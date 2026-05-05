@@ -112,7 +112,7 @@ impl State {
         self.capabilities & Capability::CURSOR > 0
     }
 
-    pub fn supports_blink(&self) -> bool {
+    pub fn supports_blinking(&self) -> bool {
         self.capabilities & Capability::BLINK > 0
     }
 
