@@ -1,14 +1,6 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+pub mod color;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+/// A module for "simple" consoles. Simple consoles are basic consoles
+/// that consume no memory resources and only support write-through.
+/// They are useful for constrained or early boot environments.
+pub mod simple;
