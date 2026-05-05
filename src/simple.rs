@@ -1,4 +1,5 @@
 use crate::color::Color;
+use core::cell::Cell;
 
 pub enum Error {
     Unsupported,
@@ -26,31 +27,21 @@ pub enum ScrollDirection {
 
 pub struct Cursor {
     /// Cursor is enabled or disabled.
-    enabled: bool,
+    pub enabled: bool,
     /// Cursor is blinking or not. Only meaningful if the console
     /// has the BLINK capability.
-    blinking: bool,
-}
-
-impl Cursor {
-    pub fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    pub fn blinking(&self) -> bool {
-        self.blinking
-    }
+    pub blinking: bool,
 }
 
 pub struct State {
-    width: usize,
-    height: usize,
-    x: usize,
-    y: usize,
+    pub width: usize,
+    pub height: usize,
+    pub x: usize,
+    pub y: usize,
     capabilities: usize,
-    fg: Color,
-    bg: Color,
-    cursor: Cursor,
+    fg: Cell<Color>,
+    bg: Cell<Color>,
+    pub cursor: Cursor,
 }
 
 impl State {
@@ -61,46 +52,14 @@ impl State {
             x: 0,
             y: 0,
             capabilities,
-            fg: Color::White,
-            bg: Color::Black,
+            fg: Cell::new(Color::White),
+            bg: Cell::new(Color::Black),
             cursor: Cursor {
+                // Consoles with the CURSOR capability
+                // must start with the cursor visible.
                 enabled: capabilities & Capability::CURSOR > 0,
                 blinking: false,
             },
-        }
-    }
-
-    pub fn width(&self) -> usize {
-        self.width
-    }
-
-    pub fn height(&self) -> usize {
-        self.height
-    }
-
-    pub fn x(&self) -> usize {
-        self.x
-    }
-
-    pub fn set_x(&mut self, x: usize) -> Result<()> {
-        if x < self.width {
-            self.x = x;
-            Ok(())
-        } else {
-            Err(Error::Invalid)
-        }
-    }
-
-    pub fn y(&self) -> usize {
-        self.y
-    }
-
-    pub fn set_y(&mut self, y: usize) -> Result<()> {
-        if y < self.height {
-            self.y = y;
-            Ok(())
-        } else {
-            Err(Error::Invalid)
         }
     }
 
@@ -117,58 +76,53 @@ impl State {
     }
 
     pub fn fg(&self) -> Color {
-        self.fg
+        self.fg.get()
     }
 
-    pub fn set_fg(&mut self, fg: Color) -> Result<()> {
+    pub fn set_fg(&self, fg: Color) -> Result<()> {
         match fg {
             Color::Rgb(_, _, _) => {
-                if self.supports_rgb() {
-                    self.fg = fg;
-                    Ok(())
-                } else {
-                    Err(Error::Unsupported)
+                if !self.supports_rgb() {
+                    return Err(Error::Unsupported);
                 }
             }
-            _ => {
-                self.fg = fg;
-                Ok(())
-            }
+            _ => {}
         }
+        self.fg.replace(fg);
+        Ok(())
     }
 
     pub fn bg(&self) -> Color {
-        self.bg
+        self.bg.get()
     }
 
-    pub fn set_bg(&mut self, bg: Color) -> Result<()> {
+    pub fn set_bg(&self, bg: Color) -> Result<()> {
         match bg {
             Color::Rgb(_, _, _) => {
-                if self.supports_rgb() {
-                    self.bg = bg;
-                    Ok(())
-                } else {
-                    Err(Error::Unsupported)
+                if !self.supports_rgb() {
+                    return Err(Error::Unsupported);
                 }
             }
-            _ => {
-                self.bg = bg;
-                Ok(())
-            }
+            _ => {}
         }
-    }
-
-    pub fn cursor(&self) -> &Cursor {
-        &self.cursor
+        self.bg.replace(bg);
+        Ok(())
     }
 }
 
 pub trait Console {
-    fn blink_cursor(&mut self, blink: Option<bool>);
+    /// Set blink state or toggle if None.
+    fn blink_cursor(&mut self, blink: Option<bool>) -> Result<()>;
+    /// Clears the whole viewport using the current
+    /// foreground and background color.
     fn clear(&mut self) -> Result<()>;
-    fn enable_cursor(&mut self, enabled: bool);
+    fn enable_cursor(&mut self, enabled: bool) -> Result<()>;
+    /// The arguments x and y must be in bounds of width and height respectively.
+    fn move_cursor(&mut self, x: usize, y: usize) -> Result<()>;
+    /// Scroll either up or down by rows. If rows >= height,
+    /// this operation is functionally equivalent to a clear.
     fn scroll(&mut self, direction: ScrollDirection, rows: usize) -> Result<()>;
     fn state(&self) -> &State;
-    fn state_mut(&mut self) -> &mut State;
+    /// Character encoding is implementation-defined. In most cases it will either be ASCII or UTF-8.
     fn write(&mut self, s: &[u8]) -> Result<usize>;
 }
