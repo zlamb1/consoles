@@ -140,6 +140,7 @@ impl Console for VgaConsole {
             outb(CRTC_ADDRESS_REG, CRTC_CURSOR_START_REG);
             outb(CRTC_DATA_REG, new_value);
         }
+        self.state.cursor.enabled = enabled;
         Ok(())
     }
 
