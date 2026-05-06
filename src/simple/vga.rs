@@ -36,6 +36,14 @@ impl VgaConsole {
         }
     }
 
+    /// Clear to default attributes and move cursor to start.
+    pub fn init(&mut self) {
+        let _ = self.clear();
+        let _ = self.enable_cursor(true);
+        let _ = self.move_cursor(0, 0);
+        let _ = self.sync();
+    }
+
     fn vga_color(&self, color: Color) -> u8 {
         match color {
             Color::Rgb(_, _, _) => unreachable!(),
