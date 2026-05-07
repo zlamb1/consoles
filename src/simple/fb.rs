@@ -277,8 +277,16 @@ impl Console for FbConsole<'_> {
         &self.state
     }
 
+    fn sync(&mut self) -> Result<()> {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(not(miri))]
+        unsafe {
+            core::arch::asm!("sfence", options(nomem, nostack));
+        }
+        Ok(())
+    }
+
     fn write(&mut self, s: &[u8]) -> Result<usize> {
-        let visible = self.state.cursor.visible;
         let len = s.len();
 
         let font: BitmapFont = *self.font;
@@ -301,11 +309,6 @@ impl Console for FbConsole<'_> {
 
         let fg = self.color(self.state.fg()).to_ne_bytes();
         let bg = self.color(self.state.bg()).to_ne_bytes();
-
-        if visible {
-            // Don't leave the cursor behind before we move it.
-            self.blink_cursor(Some(false))?;
-        }
 
         while i < len {
             let target = i + min(len - i, cell_count - cell_index);
@@ -347,20 +350,6 @@ impl Console for FbConsole<'_> {
         self.state.x = cell_index % self.state.width;
         self.state.y = cell_index / self.state.width;
 
-        if visible {
-            // If the cursor was visible before, render at the new position.
-            self.blink_cursor(Some(true))?;
-        }
-
         Ok(len)
-    }
-
-    fn sync(&mut self) -> Result<()> {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        #[cfg(not(miri))]
-        unsafe {
-            core::arch::asm!("sfence", options(nomem, nostack));
-        }
-        Ok(())
     }
 }

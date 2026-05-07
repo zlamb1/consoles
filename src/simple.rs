@@ -35,8 +35,8 @@ pub enum ScrollDirection {
 pub struct Cursor {
     /// Cursor is enabled or disabled.
     pub enabled: bool,
-    /// Cursor is visible or not. Only meaningful if the console
-    /// has the BLINK capability.
+    /// Cursor is visible or not. Must be false if the implementation does not
+    /// have the BLINK capability.
     pub visible: bool,
 }
 
@@ -120,7 +120,8 @@ impl State {
 
 pub trait Console {
     fn backspace(&mut self) -> Result<()>;
-    /// Set blink state or toggle if None.
+    /// Set blink state or toggle if None. Note that other operations are not required to
+    /// unblink the cursor. This must be done manually before any operations that could move the cursor.
     fn blink_cursor(&mut self, visible: Option<bool>) -> Result<()>;
     fn carriage_return(&mut self) -> Result<()>;
     /// Clears the whole viewport using the current
@@ -135,9 +136,6 @@ pub trait Console {
     /// this operation is functionally equivalent to a clear.
     fn scroll(&mut self, direction: ScrollDirection, rows: usize) -> Result<()>;
     fn state(&self) -> &State;
-    /// Character encoding is implementation-defined. In most cases it will either be ASCII or UTF-8.
-    /// Control codes must be handled independently of this function.
-    fn write(&mut self, s: &[u8]) -> Result<usize>;
     /// Implementation-defined synchronization. Should be called by consumers after some number of batched writes.
     /// Examples:
     /// - Hardware cursor syncing.
@@ -148,69 +146,103 @@ pub trait Console {
     fn tab(&mut self) -> Result<()> {
         Ok(())
     }
+    /// Character encoding is implementation-defined. In most cases it will either be ASCII or UTF-8.
+    /// Control codes must be handled independently of this function.
+    fn write(&mut self, s: &[u8]) -> Result<usize>;
+}
+
+pub fn with_cursor_hidden<F, R>(console: &mut impl Console, f: F) -> Result<R>
+where
+    F: FnOnce(&mut dyn Console) -> Result<R>,
+{
+    let mut visible = console.state().cursor.visible;
+    if visible {
+        let _ = console
+            .blink_cursor(Some(false))
+            .inspect_err(|_| visible = false);
+    }
+    let r = f(console);
+    if visible {
+        let _ = console.blink_cursor(Some(true));
+    }
+    return r;
+}
+
+pub fn backspace(console: &mut impl Console) -> Result<()> {
+    with_cursor_hidden(console, |console| console.backspace())
+}
+
+pub fn newline(console: &mut impl Console) -> Result<()> {
+    with_cursor_hidden(console, |console| console.newline())
+}
+
+pub fn tab(console: &mut impl Console) -> Result<()> {
+    with_cursor_hidden(console, |console| console.tab())
 }
 
 /// This helper expects ASCII or an ASCII-compatible encoding to interpret control codes.
-pub fn console_write(console: &mut impl Console, s: &[u8]) -> Result<usize> {
-    let mut i: usize = 0;
-    // Note: written tracks _all_ bytes, including control codes.
-    let mut written: usize = 0;
+pub fn write(console: &mut impl Console, s: &[u8]) -> Result<usize> {
+    with_cursor_hidden(console, |console| {
+        let mut i: usize = 0;
+        // Note: written tracks _all_ bytes, including control codes.
+        let mut written: usize = 0;
 
-    loop {
-        let mut j: usize = i;
-        let len = s.len();
+        loop {
+            let mut j: usize = i;
+            let len = s.len();
 
-        while j < len {
-            let ch = s[j];
+            while j < len {
+                let ch = s[j];
+                match ch {
+                    0x8 | b'\t' | b'\n' | b'\r' => break,
+                    _ => {}
+                }
+                j += 1;
+            }
+
+            while j > i {
+                let did_write = console.write(&s[i..j])?;
+                if did_write == 0 {
+                    let _ = console.sync();
+                    return Err(Error::Progress);
+                }
+                i += did_write;
+                if i > j {
+                    // Bad implementation.
+                    let _ = console.sync();
+                    return Err(Error::Implementation);
+                }
+                written += did_write;
+            }
+
+            if i == len {
+                break;
+            }
+
+            let ch = s[i];
             match ch {
-                0x8 | b'\t' | b'\n' | b'\r' => break,
-                _ => {}
+                0x8 => {
+                    console.backspace()?;
+                }
+                b'\t' => {
+                    console.tab()?;
+                }
+                b'\n' => {
+                    console.newline()?;
+                }
+                b'\r' => {
+                    console.carriage_return()?;
+                }
+                _ => unreachable!(),
             }
-            j += 1;
+
+            i += 1;
+            written += 1;
         }
 
-        while j > i {
-            let did_write = console.write(&s[i..j])?;
-            if did_write == 0 {
-                let _ = console.sync();
-                return Err(Error::Progress);
-            }
-            i += did_write;
-            if i > j {
-                // Bad implementation.
-                let _ = console.sync();
-                return Err(Error::Implementation);
-            }
-            written += did_write;
-        }
-
-        if i == len {
-            break;
-        }
-
-        let ch = s[i];
-        match ch {
-            0x8 => {
-                console.backspace()?;
-            }
-            b'\t' => {
-                console.tab()?;
-            }
-            b'\n' => {
-                console.newline()?;
-            }
-            b'\r' => {
-                console.carriage_return()?;
-            }
-            _ => unreachable!(),
-        }
-
-        i += 1;
-        written += 1;
-    }
-
-    console.sync()?;
-    Ok(written)
+        console.sync()?;
+        Ok(written)
+    })
 }
 
 pub mod fb;

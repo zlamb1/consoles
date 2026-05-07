@@ -2,7 +2,7 @@ use crate::color::{Color, Palette};
 use crate::fb::{Framebuffer, Mask};
 use crate::simple::Console;
 
-use super::{console_write, fb::FbConsole};
+use super::fb::FbConsole;
 
 fn harness(console: &mut impl Console) {
     let colors = [
@@ -26,7 +26,7 @@ fn harness(console: &mut impl Console) {
     console.clear().unwrap();
     for color in colors {
         console.state().set_fg(Color::Palette(color)).unwrap();
-        console_write(console, b"The quick brown fox jumps over the lazy dog.\n").unwrap();
+        super::write(console, b"The quick brown fox jumps over the lazy dog.\n").unwrap();
     }
 }
 
@@ -96,6 +96,7 @@ mod sdl3_tests {
         };
 
         let mut fb_console = super::FbConsole::new(fb, None).unwrap();
+        fb_console.blink_cursor(Some(true)).unwrap();
 
         super::harness(&mut fb_console);
 

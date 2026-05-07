@@ -230,6 +230,16 @@ impl Console for VgaConsole {
         &self.state
     }
 
+    fn sync(&mut self) -> Result<()> {
+        // Synchronize VGA hardware cursor.
+        let index = self.index();
+        outb(CRTC_ADDRESS_REG, CRTC_CURSOR_LOW_REG);
+        outb(CRTC_DATA_REG, (index & 0xFF) as u8);
+        outb(CRTC_ADDRESS_REG, CRTC_CURSOR_HIGH_REG);
+        outb(CRTC_DATA_REG, ((index >> 8) & 0xFF) as u8);
+        Ok(())
+    }
+
     fn write(&mut self, s: &[u8]) -> Result<usize> {
         let cell_count = self.cell_count();
         let mut cell_index = self.index();
@@ -264,15 +274,5 @@ impl Console for VgaConsole {
         self.state.y = cell_index / width;
 
         Ok(len)
-    }
-
-    fn sync(&mut self) -> Result<()> {
-        // Synchronize VGA hardware cursor.
-        let index = self.index();
-        outb(CRTC_ADDRESS_REG, CRTC_CURSOR_LOW_REG);
-        outb(CRTC_DATA_REG, (index & 0xFF) as u8);
-        outb(CRTC_ADDRESS_REG, CRTC_CURSOR_HIGH_REG);
-        outb(CRTC_DATA_REG, ((index >> 8) & 0xFF) as u8);
-        Ok(())
     }
 }
