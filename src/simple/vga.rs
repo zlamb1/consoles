@@ -1,6 +1,4 @@
-use crate::simple::Capability;
-
-use super::{Color, Console, Error, Result, ScrollDirection, State};
+use super::{Capability, Color, Console, Error, Palette, Result, ScrollDirection, State};
 
 const CRTC_ADDRESS_REG: u16 = 0x3D4;
 const CRTC_DATA_REG: u16 = 0x3D5;
@@ -48,22 +46,24 @@ impl VgaConsole {
     fn vga_color(&self, color: Color) -> u8 {
         match color {
             Color::Rgb(_, _, _) => unreachable!(),
-            Color::Black => 0,
-            Color::Red => 4,
-            Color::Green => 2,
-            Color::Brown => 6,
-            Color::Blue => 1,
-            Color::Magenta => 5,
-            Color::Cyan => 3,
-            Color::LightGray => 7,
-            Color::DarkGray => 8,
-            Color::LightRed => 12,
-            Color::LightGreen => 10,
-            Color::Yellow => 14,
-            Color::LightBlue => 9,
-            Color::LightMagenta => 13,
-            Color::LightCyan => 11,
-            Color::White => 15,
+            Color::Palette(color) => match color {
+                Palette::Black => 0,
+                Palette::Red => 4,
+                Palette::Green => 2,
+                Palette::Brown => 6,
+                Palette::Blue => 1,
+                Palette::Magenta => 5,
+                Palette::Cyan => 3,
+                Palette::LightGray => 7,
+                Palette::DarkGray => 8,
+                Palette::LightRed => 12,
+                Palette::LightGreen => 10,
+                Palette::Yellow => 14,
+                Palette::LightBlue => 9,
+                Palette::LightMagenta => 13,
+                Palette::LightCyan => 11,
+                Palette::White => 15,
+            },
         }
     }
 
@@ -232,10 +232,10 @@ impl Console for VgaConsole {
 
     fn write(&mut self, s: &[u8]) -> Result<usize> {
         let cell_count = self.cell_count();
-        let mut index = self.index();
+        let mut cell_index = self.index();
         let mut i: usize = 0;
 
-        let last_row: usize = (self.state.height - 1) * self.state.width;
+        let reset_row: usize = (self.state.height - 1) * self.state.width;
 
         let mut cell = VgaCell {
             ch: 0,
@@ -244,24 +244,24 @@ impl Console for VgaConsole {
 
         let len = s.len();
         while i < len {
-            let target = i + core::cmp::min(len - i, cell_count - index);
+            let target = i + core::cmp::min(len - i, cell_count - cell_index);
             while i < target {
                 cell.ch = s[i];
                 unsafe {
-                    self.ptr.add(index).write_volatile(cell);
+                    self.ptr.add(cell_index).write_volatile(cell);
                 }
-                index += 1;
+                cell_index += 1;
                 i += 1;
             }
-            if index == cell_count {
-                index = last_row;
+            if cell_index == cell_count {
+                cell_index = reset_row;
                 self.scroll(ScrollDirection::Down, 1)?;
             }
         }
 
         let width = self.state.width;
-        self.state.x = index % width;
-        self.state.y = index / width;
+        self.state.x = cell_index % width;
+        self.state.y = cell_index / width;
 
         Ok(len)
     }

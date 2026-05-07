@@ -1,6 +1,5 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Color {
-    Rgb(u8, u8, u8),
+pub enum Palette {
     Black,
     Red,
     Green,
@@ -17,4 +16,10 @@ pub enum Color {
     LightMagenta,
     LightCyan,
     White,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Color {
+    Rgb(u8, u8, u8),
+    Palette(Palette),
 }

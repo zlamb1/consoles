@@ -1,3 +1,4 @@
+#[derive(Clone, Copy, Debug)]
 pub struct BitmapFont<'a> {
     pub width: usize,
     pub height: usize,

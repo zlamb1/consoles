@@ -1,4 +1,4 @@
-use crate::color::Color;
+use crate::color::{Color, Palette};
 use core::{cell::Cell, unreachable};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,9 +35,9 @@ pub enum ScrollDirection {
 pub struct Cursor {
     /// Cursor is enabled or disabled.
     pub enabled: bool,
-    /// Cursor is blinking or not. Only meaningful if the console
+    /// Cursor is visible or not. Only meaningful if the console
     /// has the BLINK capability.
-    pub blinking: bool,
+    pub visible: bool,
 }
 
 #[derive(Debug)]
@@ -60,13 +60,13 @@ impl State {
             x: 0,
             y: 0,
             capabilities,
-            fg: Cell::new(Color::White),
-            bg: Cell::new(Color::Black),
+            fg: Cell::new(Color::Palette(Palette::White)),
+            bg: Cell::new(Color::Palette(Palette::Black)),
             cursor: Cursor {
                 // Consoles with the CURSOR capability
                 // must start with the cursor visible.
                 enabled: capabilities & Capability::CURSOR > 0,
-                blinking: false,
+                visible: false,
             },
         }
     }
@@ -121,7 +121,7 @@ impl State {
 pub trait Console {
     fn backspace(&mut self) -> Result<()>;
     /// Set blink state or toggle if None.
-    fn blink_cursor(&mut self, blink: Option<bool>) -> Result<()>;
+    fn blink_cursor(&mut self, visible: Option<bool>) -> Result<()>;
     fn carriage_return(&mut self) -> Result<()>;
     /// Clears the whole viewport using the current
     /// foreground and background color. Does not implicitly modify cursor state.
@@ -136,6 +136,7 @@ pub trait Console {
     fn scroll(&mut self, direction: ScrollDirection, rows: usize) -> Result<()>;
     fn state(&self) -> &State;
     /// Character encoding is implementation-defined. In most cases it will either be ASCII or UTF-8.
+    /// Control codes must be handled independently of this function.
     fn write(&mut self, s: &[u8]) -> Result<usize>;
     /// Implementation-defined synchronization. Should be called by consumers after some number of batched writes.
     /// Examples:
@@ -211,6 +212,11 @@ pub fn console_write(console: &mut impl Console, s: &[u8]) -> Result<usize> {
     console.sync()?;
     Ok(written)
 }
+
+pub mod fb;
+
+#[cfg(test)]
+pub mod fb_test;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub mod vga;

@@ -1,4 +1,5 @@
 pub mod color;
+pub mod fb;
 pub mod font;
 
 /// A module for "simple" consoles. Simple consoles are basic consoles
