@@ -1,7 +1,7 @@
 use crate::cell_grid::{CellGrid, CellWriter};
 use crate::color::{Color, Palette};
 use crate::cursor::{Cursor, with_cursor_hidden};
-use crate::fb::Framebuffer;
+use crate::fb::{Framebuffer, Mask};
 use crate::font::{BitmapFont, data::DEFAULT_FONT};
 use crate::simple::{
     BlinkConsole, CellConsole, ColorConsole, Console, CursorConsole, Error, Result,
@@ -9,17 +9,52 @@ use crate::simple::{
 
 use core::cmp::min;
 
+struct CachedColor {
+    color: Color,
+    word: u32,
+}
+
+impl CachedColor {
+    fn new(color: Color, word: u32) -> Self {
+        Self { color, word }
+    }
+}
+
+impl Color {
+    fn as_word(
+        self,
+        palette: &[(u8, u8, u8); 16],
+        red_mask: Mask,
+        green_mask: Mask,
+        blue_mask: Mask,
+    ) -> u32 {
+        let rgb = match self {
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::Palette(color) => palette[color as usize],
+        };
+
+        // We just clip any bottom bits, which will produce banding.
+        // We don't support dithering.
+        let mut color: u32 = 0;
+        color |= ((rgb.0 as u32) >> (8 - min(red_mask.size, 8))) << red_mask.shift;
+        color |= ((rgb.1 as u32) >> (8 - min(green_mask.size, 8))) << green_mask.shift;
+        color |= ((rgb.2 as u32) >> (8 - min(blue_mask.size, 8))) << blue_mask.shift;
+
+        color
+    }
+}
+
 struct Backend<'a> {
-    pub fb: Framebuffer,
-    pub font: &'a BitmapFont<'a>,
-    pub cursor: Cursor,
-    pub fg: Color,
-    pub bg: Color,
-    pub palette: [(u8, u8, u8); 16],
+    fb: Framebuffer,
+    font: &'a BitmapFont<'a>,
+    cursor: Cursor,
+    fg: CachedColor,
+    bg: CachedColor,
+    palette: [(u8, u8, u8); 16],
     /// Glyph width in bytes.
-    pub glyph_advance: usize,
+    glyph_advance: usize,
     /// Bytes to get the next row's glyph.
-    pub glyph_pitch: usize,
+    glyph_pitch: usize,
 }
 
 impl<'a> Backend<'a> {
@@ -28,8 +63,8 @@ impl<'a> Backend<'a> {
             return;
         }
         let visible = !self.cursor.visible;
-        let color = if visible { self.fg } else { self.bg };
-        let color = self.color(color).to_ne_bytes();
+        let color = if visible { self.fg.word } else { self.bg.word };
+        let color = color.to_ne_bytes();
         let bytes_per_pixel = self.fb.bpp / 8;
 
         let mut pixel = self.get_index(cell_grid);
@@ -47,7 +82,7 @@ impl<'a> Backend<'a> {
     }
 
     fn clear(&mut self) -> Result<()> {
-        let bg = self.color(self.bg).to_ne_bytes();
+        let bg = self.bg.word.to_ne_bytes();
         let bytes_per_pixel = self.fb.bpp / 8;
         let pad = self.fb.pitch - self.fb.width * bytes_per_pixel;
 
@@ -69,22 +104,12 @@ impl<'a> Backend<'a> {
     }
 
     fn color(&self, color: Color) -> u32 {
-        let rgb = match color {
-            Color::Rgb(r, g, b) => (r, g, b),
-            Color::Palette(color) => self.palette[color as usize],
-        };
-        let red_mask = self.fb.red_mask;
-        let green_mask = self.fb.green_mask;
-        let blue_mask = self.fb.blue_mask;
-
-        // We just clip any bottom bits, which will produce banding.
-        // We don't support dithering.
-        let mut color: u32 = 0;
-        color |= ((rgb.0 as u32) >> (8 - min(red_mask.size, 8))) << red_mask.shift;
-        color |= ((rgb.1 as u32) >> (8 - min(green_mask.size, 8))) << green_mask.shift;
-        color |= ((rgb.2 as u32) >> (8 - min(blue_mask.size, 8))) << blue_mask.shift;
-
-        color
+        color.as_word(
+            &self.palette,
+            self.fb.red_mask,
+            self.fb.green_mask,
+            self.fb.blue_mask,
+        )
     }
 
     fn new(fb: Framebuffer, font: Option<&'a BitmapFont<'a>>) -> Option<Self> {
@@ -103,30 +128,41 @@ impl<'a> Backend<'a> {
             return None;
         }
 
+        let palette = [
+            (0, 0, 0),
+            (128, 0, 0),
+            (0, 128, 0),
+            (128, 128, 0),
+            (0, 0, 128),
+            (128, 0, 128),
+            (0, 128, 128),
+            (192, 192, 192),
+            (128, 128, 128),
+            (255, 0, 0),
+            (0, 255, 0),
+            (255, 255, 0),
+            (0, 0, 255),
+            (255, 0, 255),
+            (0, 255, 255),
+            (255, 255, 255),
+        ];
+
+        let fg = Color::Palette(Palette::White);
+        let bg = Color::Palette(Palette::Black);
+
         Some(Self {
             fb,
             font,
             cursor: Cursor::new(),
-            fg: Color::Palette(Palette::White),
-            bg: Color::Palette(Palette::Black),
-            palette: [
-                (0, 0, 0),
-                (128, 0, 0),
-                (0, 128, 0),
-                (128, 128, 0),
-                (0, 0, 128),
-                (128, 0, 128),
-                (0, 128, 128),
-                (192, 192, 192),
-                (128, 128, 128),
-                (255, 0, 0),
-                (0, 255, 0),
-                (255, 255, 0),
-                (0, 0, 255),
-                (255, 0, 255),
-                (0, 255, 255),
-                (255, 255, 255),
-            ],
+            fg: CachedColor::new(
+                fg,
+                fg.as_word(&palette, fb.red_mask, fb.green_mask, fb.blue_mask),
+            ),
+            bg: CachedColor::new(
+                bg,
+                bg.as_word(&palette, fb.red_mask, fb.green_mask, fb.blue_mask),
+            ),
+            palette,
             glyph_advance: font.width * (fb.bpp / 8),
             glyph_pitch: font.height * fb.pitch,
         })
@@ -148,7 +184,7 @@ impl<'a> Backend<'a> {
         let clear = self.font.height;
         let bytes_per_pixel = self.fb.bpp / 8;
         let pad = self.fb.pitch - self.fb.width * bytes_per_pixel;
-        let bg = self.color(self.bg).to_ne_bytes();
+        let bg = self.bg.word.to_ne_bytes();
 
         let mut dst = self.fb.ptr;
         let mut src = unsafe { dst.add(clear * self.fb.pitch) };
@@ -192,8 +228,8 @@ impl<'a> Backend<'a> {
     }
 
     fn write_cell(&mut self, _: &CellGrid, pixel: *mut u8, ch: u8) -> Result<()> {
-        let fg = self.color(self.fg).to_ne_bytes();
-        let bg = self.color(self.bg).to_ne_bytes();
+        let fg = self.fg.word.to_ne_bytes();
+        let bg = self.bg.word.to_ne_bytes();
         let font = self.font;
         let bytes_per_pixel = self.fb.bpp / 8;
 
@@ -335,20 +371,20 @@ impl BlinkConsole for FbConsole<'_> {
 
 impl ColorConsole for FbConsole<'_> {
     fn fg(&self) -> Color {
-        self.backend.fg
+        self.backend.fg.color
     }
 
     fn bg(&self) -> Color {
-        self.backend.bg
+        self.backend.bg.color
     }
 
     fn set_fg(&mut self, fg: Color) -> Result<()> {
-        self.backend.fg = fg;
+        self.backend.fg = CachedColor::new(fg, self.backend.color(fg));
         Ok(())
     }
 
     fn set_bg(&mut self, bg: Color) -> Result<()> {
-        self.backend.bg = bg;
+        self.backend.fg = CachedColor::new(bg, self.backend.color(bg));
         Ok(())
     }
 }
