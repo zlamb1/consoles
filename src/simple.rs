@@ -1,5 +1,5 @@
-use crate::color::{Color, Palette};
-use core::{cell::Cell, unreachable};
+use crate::cell_grid::CellGrid;
+use crate::color::Color;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -13,236 +13,50 @@ pub enum Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// Marker struct for capability bit flags.  
-pub struct Capability;
-
-impl Capability {
-    /// Supports RGB colors beyond the normal 16-bit palette.
-    const RGB: usize = 0x1;
-    /// Supports cursor via Console::enable_cursor.
-    const CURSOR: usize = 0x2;
-    /// Supports blinking via Console::blink_cursor.
-    const BLINK: usize = 0x4;
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScrollDirection {
-    Up,
-    Down,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Cursor {
-    /// Cursor is enabled or disabled.
-    pub enabled: bool,
-    /// Cursor is visible or not. Must be false if the implementation does not
-    /// have the BLINK capability.
-    pub visible: bool,
-}
-
-#[derive(Debug)]
-pub struct State {
-    pub width: usize,
-    pub height: usize,
-    pub x: usize,
-    pub y: usize,
-    capabilities: usize,
-    fg: Cell<Color>,
-    bg: Cell<Color>,
-    pub cursor: Cursor,
-}
-
-impl State {
-    pub fn new(width: usize, height: usize, capabilities: usize) -> Self {
-        Self {
-            width,
-            height,
-            x: 0,
-            y: 0,
-            capabilities,
-            fg: Cell::new(Color::Palette(Palette::White)),
-            bg: Cell::new(Color::Palette(Palette::Black)),
-            cursor: Cursor {
-                // Consoles with the CURSOR capability
-                // must start with the cursor visible.
-                enabled: capabilities & Capability::CURSOR > 0,
-                visible: false,
-            },
-        }
-    }
-
-    pub fn supports_rgb(&self) -> bool {
-        self.capabilities & Capability::RGB > 0
-    }
-
-    pub fn supports_cursor(&self) -> bool {
-        self.capabilities & Capability::CURSOR > 0
-    }
-
-    pub fn supports_blinking(&self) -> bool {
-        self.capabilities & Capability::BLINK > 0
-    }
-
-    pub fn fg(&self) -> Color {
-        self.fg.get()
-    }
-
-    pub fn set_fg(&self, fg: Color) -> Result<()> {
-        match fg {
-            Color::Rgb(_, _, _) => {
-                if !self.supports_rgb() {
-                    return Err(Error::Unsupported);
-                }
-            }
-            _ => {}
-        }
-        self.fg.replace(fg);
-        Ok(())
-    }
-
-    pub fn bg(&self) -> Color {
-        self.bg.get()
-    }
-
-    pub fn set_bg(&self, bg: Color) -> Result<()> {
-        match bg {
-            Color::Rgb(_, _, _) => {
-                if !self.supports_rgb() {
-                    return Err(Error::Unsupported);
-                }
-            }
-            _ => {}
-        }
-        self.bg.replace(bg);
-        Ok(())
-    }
-}
-
 pub trait Console {
-    fn backspace(&mut self) -> Result<()>;
-    /// Set blink state or toggle if None. Note that other operations are not required to
-    /// unblink the cursor. This must be done manually before any operations that could move the cursor.
-    fn blink_cursor(&mut self, visible: Option<bool>) -> Result<()>;
-    fn carriage_return(&mut self) -> Result<()>;
-    /// Clears the whole viewport using the current
-    /// foreground and background color. Does not implicitly modify cursor state.
+    /// Clears any remnant text.
     fn clear(&mut self) -> Result<()>;
-    fn enable_cursor(&mut self, enabled: bool) -> Result<()>;
-    /// Carriage return is implied.
-    fn newline(&mut self) -> Result<()>;
-    /// The arguments x and y must be in bounds of width and height respectively.
-    fn move_cursor(&mut self, x: usize, y: usize) -> Result<()>;
-    /// Scroll either up or down by rows. If rows >= height,
-    /// this operation is functionally equivalent to a clear.
-    fn scroll(&mut self, direction: ScrollDirection, rows: usize) -> Result<()>;
-    fn state(&self) -> &State;
     /// Implementation-defined synchronization. Should be called by consumers after some number of batched writes.
     /// Examples:
     /// - Hardware cursor syncing.
     /// - Flushing write-combining memory of a framebuffer.
     /// - A no-op.
-    fn sync(&mut self) -> Result<()>;
-    /// Default behavior is a no-op.
-    fn tab(&mut self) -> Result<()> {
-        Ok(())
-    }
+    fn flush(&mut self) -> Result<()>;
     /// Character encoding is implementation-defined. In most cases it will either be ASCII or UTF-8.
-    /// Control codes must be handled independently of this function.
     fn write(&mut self, s: &[u8]) -> Result<usize>;
 }
 
-pub fn with_cursor_hidden<F, R>(console: &mut impl Console, f: F) -> Result<R>
-where
-    F: FnOnce(&mut dyn Console) -> Result<R>,
-{
-    let mut visible = console.state().cursor.visible;
-    if visible {
-        let _ = console
-            .blink_cursor(Some(false))
-            .inspect_err(|_| visible = false);
-    }
-    let r = f(console);
-    if visible {
-        let _ = console.blink_cursor(Some(true));
-    }
-    return r;
+/// A console defined to use a visual representation
+/// that is a grid. It has a width, height, x, and y.
+pub trait CellConsole: Console {
+    fn cell_grid(&self) -> &CellGrid;
+    /// Move the cursor to a new x and y.
+    fn position(&mut self, x: usize, y: usize) -> Result<()>;
+    /// Scrolls the console down one row.
+    fn scroll(&mut self) -> Result<()>;
 }
 
-pub fn backspace(console: &mut impl Console) -> Result<()> {
-    with_cursor_hidden(console, |console| console.backspace())
+/// A console that supports enabling or disabling a cursor.
+pub trait CursorConsole: CellConsole {
+    /// Enable or disable the cursor.
+    fn enable(&mut self, enable: bool) -> Result<()>;
 }
 
-pub fn newline(console: &mut impl Console) -> Result<()> {
-    with_cursor_hidden(console, |console| console.newline())
+/// A cursor console that supports manual blinking of the cursor.
+pub trait BlinkConsole: CursorConsole {
+    /// Toggle blink state of the cursor. This operation is not failable.
+    fn blink(&mut self);
+    /// Whether the cursor is currently visible or not.
+    fn visible(&self) -> bool;
 }
 
-pub fn tab(console: &mut impl Console) -> Result<()> {
-    with_cursor_hidden(console, |console| console.tab())
-}
-
-/// This helper expects ASCII or an ASCII-compatible encoding to interpret control codes.
-pub fn write(console: &mut impl Console, s: &[u8]) -> Result<usize> {
-    with_cursor_hidden(console, |console| {
-        let mut i: usize = 0;
-        // Note: written tracks _all_ bytes, including control codes.
-        let mut written: usize = 0;
-
-        loop {
-            let mut j: usize = i;
-            let len = s.len();
-
-            while j < len {
-                let ch = s[j];
-                match ch {
-                    0x8 | b'\t' | b'\n' | b'\r' => break,
-                    _ => {}
-                }
-                j += 1;
-            }
-
-            while j > i {
-                let did_write = console.write(&s[i..j])?;
-                if did_write == 0 {
-                    let _ = console.sync();
-                    return Err(Error::Progress);
-                }
-                i += did_write;
-                if i > j {
-                    // Bad implementation.
-                    let _ = console.sync();
-                    return Err(Error::Implementation);
-                }
-                written += did_write;
-            }
-
-            if i == len {
-                break;
-            }
-
-            let ch = s[i];
-            match ch {
-                0x8 => {
-                    console.backspace()?;
-                }
-                b'\t' => {
-                    console.tab()?;
-                }
-                b'\n' => {
-                    console.newline()?;
-                }
-                b'\r' => {
-                    console.carriage_return()?;
-                }
-                _ => unreachable!(),
-            }
-
-            i += 1;
-            written += 1;
-        }
-
-        console.sync()?;
-        Ok(written)
-    })
+/// A console that supports a visual foreground and background
+/// for text.
+pub trait ColorConsole: Console {
+    fn fg(&self) -> Color;
+    fn bg(&self) -> Color;
+    fn set_fg(&mut self, fg: Color) -> Result<()>;
+    fn set_bg(&mut self, bg: Color) -> Result<()>;
 }
 
 pub mod fb;

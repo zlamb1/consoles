@@ -1,4 +1,7 @@
-use super::{Capability, Color, Console, Error, Palette, Result, ScrollDirection, State};
+use crate::cell_grid::{CellGrid, CellWriter};
+use crate::color::{Color, Palette};
+use crate::cursor::Cursor;
+use crate::simple::{CellConsole, ColorConsole, Console, CursorConsole, Error, Result};
 
 const CRTC_ADDRESS_REG: u16 = 0x3D4;
 const CRTC_DATA_REG: u16 = 0x3D5;
@@ -13,34 +16,72 @@ struct VgaCell {
     attributes: u8,
 }
 
-pub struct VgaConsole {
-    state: State,
+struct VgaBackend {
     ptr: *mut VgaCell,
+    fg: Color,
+    bg: Color,
 }
 
-impl VgaConsole {
-    const ROWS: usize = 25;
-    const COLS: usize = 80;
-    const PTR: *mut u16 = 0xB8000 as *mut u16;
-
-    pub fn new() -> Self {
-        Self::new_with_ptr(Self::PTR)
+impl VgaBackend {
+    fn attributes(&self) -> u8 {
+        (self.vga_color(self.fg) & 0xF) | ((self.vga_color(self.bg) & 0xF) << 4)
     }
 
-    pub fn new_with_ptr(ptr: *mut u16) -> Self {
+    fn clear(&mut self, cell_grid: &CellGrid) -> Result<()> {
+        let blank_cell = VgaCell {
+            ch: b' ',
+            attributes: self.attributes(),
+        };
+        let mut ptr = self.ptr;
+        for _ in 0..cell_grid.cell_count() {
+            unsafe {
+                ptr.write_volatile(blank_cell);
+                ptr = ptr.add(1);
+            }
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn get_index(&self, cell_grid: &CellGrid) -> usize {
+        cell_grid.cell_index()
+    }
+
+    fn new(ptr: *mut VgaCell) -> Self {
         Self {
-            state: State::new(Self::COLS, Self::ROWS, Capability::CURSOR),
-            ptr: ptr as *mut VgaCell,
+            ptr,
+            fg: Color::Palette(Palette::White),
+            bg: Color::Palette(Palette::Black),
         }
     }
 
-    /// Clear to default attributes and move cursor to start.
-    pub fn init(&mut self) {
-        self.state.x = 0;
-        self.state.y = 0;
-        let _ = self.clear();
-        let _ = self.enable_cursor(true);
-        let _ = self.sync();
+    fn scroll(&mut self, cell_grid: &CellGrid) -> Result<()> {
+        let cell_count = cell_grid.cell_count();
+        let clear = cell_grid.width;
+        let blank_cell = VgaCell {
+            ch: b' ',
+            attributes: self.attributes(),
+        };
+
+        let mut dst = self.ptr;
+        let mut src = unsafe { dst.add(clear) };
+
+        for _ in 0..cell_count - clear {
+            unsafe {
+                dst.write_volatile(src.read_volatile());
+                dst = dst.add(1);
+                src = src.add(1);
+            }
+        }
+
+        for _ in 0..clear {
+            unsafe {
+                dst.write_volatile(blank_cell);
+                dst = dst.add(1);
+            }
+        }
+
+        Ok(())
     }
 
     fn vga_color(&self, color: Color) -> u8 {
@@ -67,22 +108,39 @@ impl VgaConsole {
         }
     }
 
-    fn attributes(&self) -> u8 {
-        (self.vga_color(self.state.fg()) & 0xF) | ((self.vga_color(self.state.bg()) & 0xF) << 4)
-    }
-
-    fn index(&self) -> usize {
-        self.state.y * self.state.width + self.state.x
-    }
-
-    fn cell_count(&self) -> usize {
-        self.state.height * self.state.width
-    }
-
-    fn blank_cell(&self) -> VgaCell {
-        VgaCell {
-            ch: b' ',
+    fn write_cell(&mut self, cell_grid: &CellGrid, cell_index: usize, ch: u8) -> Result<()> {
+        debug_assert!(cell_index < cell_grid.cell_count());
+        let vga_cell = VgaCell {
+            ch,
             attributes: self.attributes(),
+        };
+        unsafe {
+            self.ptr.add(cell_index).write_volatile(vga_cell);
+        }
+        Ok(())
+    }
+}
+
+pub struct VgaConsole {
+    backend: VgaBackend,
+    cell_grid: CellGrid,
+    cursor: Cursor,
+}
+
+impl VgaConsole {
+    const ROWS: usize = 25;
+    const COLS: usize = 80;
+    const PTR: *mut u16 = 0xB8000 as *mut u16;
+
+    pub fn new() -> Self {
+        Self::new_with_ptr(Self::PTR)
+    }
+
+    pub fn new_with_ptr(ptr: *mut u16) -> Self {
+        Self {
+            backend: VgaBackend::new(ptr as *mut VgaCell),
+            cell_grid: CellGrid::new(Self::COLS, Self::ROWS),
+            cursor: Cursor::new(),
         }
     }
 }
@@ -102,45 +160,56 @@ fn outb(port: u16, v: u8) {
 }
 
 impl Console for VgaConsole {
-    fn backspace(&mut self) -> Result<()> {
-        if self.state.x > 0 {
-            self.state.x -= 1;
-        } else {
-            if self.state.y == 0 {
-                return Err(Error::Invalid);
-            }
-            self.state.y -= 1;
-            self.state.x = self.state.width - 1;
-        }
-        Ok(())
-    }
-
-    fn blink_cursor(&mut self, _: Option<bool>) -> Result<()> {
-        Err(Error::Unsupported)
-    }
-
-    fn carriage_return(&mut self) -> Result<()> {
-        self.state.x = 0;
-        Ok(())
-    }
-
     fn clear(&mut self) -> Result<()> {
-        let cell_count = self.cell_count();
-        let mut index: usize = 0;
-        let blank_cell = self.blank_cell();
-        while index < cell_count {
-            unsafe {
-                self.ptr.add(index).write_volatile(blank_cell);
-            }
-            index += 1;
-        }
+        self.backend.clear(&self.cell_grid)
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        // Synchronize VGA hardware cursor.
+        let cell_index = self.cell_grid.cell_index();
+        debug_assert!(cell_index < self.cell_grid.cell_count());
+        outb(CRTC_ADDRESS_REG, CRTC_CURSOR_LOW_REG);
+        outb(CRTC_DATA_REG, (cell_index & 0xFF) as u8);
+        outb(CRTC_ADDRESS_REG, CRTC_CURSOR_HIGH_REG);
+        outb(CRTC_DATA_REG, ((cell_index >> 8) & 0xFF) as u8);
         Ok(())
     }
 
-    fn enable_cursor(&mut self, enabled: bool) -> Result<()> {
+    fn write(&mut self, s: &[u8]) -> Result<usize> {
+        let mut cell_writer = CellWriter::new(
+            &mut self.backend,
+            VgaBackend::get_index,
+            VgaBackend::write_cell,
+            VgaBackend::scroll,
+        );
+        cell_writer.write(&mut self.cell_grid, s)
+    }
+}
+
+impl CellConsole for VgaConsole {
+    fn cell_grid(&self) -> &CellGrid {
+        &self.cell_grid
+    }
+
+    fn position(&mut self, x: usize, y: usize) -> Result<()> {
+        if x >= self.cell_grid.width || y >= self.cell_grid.height {
+            return Err(Error::Invalid);
+        }
+        self.cell_grid.x = x;
+        self.cell_grid.y = y;
+        Ok(())
+    }
+
+    fn scroll(&mut self) -> Result<()> {
+        self.backend.scroll(&self.cell_grid)
+    }
+}
+
+impl CursorConsole for VgaConsole {
+    fn enable(&mut self, enable: bool) -> Result<()> {
         outb(CRTC_ADDRESS_REG, CRTC_CURSOR_START_REG);
         let old_value = inb(CRTC_DATA_REG);
-        let new_value = if enabled {
+        let new_value = if enable {
             old_value & !0x20
         } else {
             old_value | 0x20
@@ -149,130 +218,35 @@ impl Console for VgaConsole {
             outb(CRTC_ADDRESS_REG, CRTC_CURSOR_START_REG);
             outb(CRTC_DATA_REG, new_value);
         }
-        self.state.cursor.enabled = enabled;
+        self.cursor.enabled = enable;
+        Ok(())
+    }
+}
+
+impl ColorConsole for VgaConsole {
+    fn fg(&self) -> Color {
+        self.backend.fg
+    }
+
+    fn bg(&self) -> Color {
+        self.backend.bg
+    }
+
+    fn set_fg(&mut self, fg: Color) -> Result<()> {
+        match fg {
+            Color::Rgb(_, _, _) => return Err(Error::Unsupported),
+            Color::Palette(_) => {}
+        }
+        self.backend.fg = fg;
         Ok(())
     }
 
-    fn newline(&mut self) -> super::Result<()> {
-        self.state.x = 0;
-        self.state.y += 1;
-        if self.state.y >= self.state.height {
-            self.state.y = self.state.height - 1;
-            self.scroll(ScrollDirection::Down, 1)?;
+    fn set_bg(&mut self, bg: Color) -> Result<()> {
+        match bg {
+            Color::Rgb(_, _, _) => return Err(Error::Unsupported),
+            Color::Palette(_) => {}
         }
+        self.backend.bg = bg;
         Ok(())
-    }
-
-    fn move_cursor(&mut self, x: usize, y: usize) -> Result<()> {
-        if x >= self.state.width || y >= self.state.height {
-            return Err(Error::Invalid);
-        }
-        self.state.x = x;
-        self.state.y = y;
-        Ok(())
-    }
-
-    fn scroll(&mut self, direction: ScrollDirection, rows: usize) -> Result<()> {
-        if rows >= self.state.height {
-            return self.clear();
-        }
-
-        let width = self.state.width;
-        let cells = self.state.height * width;
-        let clear = width * rows;
-
-        match direction {
-            ScrollDirection::Down => {
-                let mut dst = self.ptr;
-                let mut src = unsafe { dst.add(clear) };
-
-                for _ in 0..cells - clear {
-                    unsafe {
-                        dst.write_volatile(src.read_volatile());
-                        dst = dst.add(1);
-                        src = src.add(1);
-                    }
-                }
-
-                let blank_cell = self.blank_cell();
-                for _ in 0..clear {
-                    unsafe {
-                        dst.write_volatile(blank_cell);
-                        dst = dst.add(1);
-                    }
-                }
-            }
-            ScrollDirection::Up => {
-                let mut dst = unsafe { self.ptr.add(cells - 1) };
-                let mut src = unsafe { dst.sub(clear) };
-
-                for _ in 0..cells - clear {
-                    unsafe {
-                        dst.write_volatile(src.read_volatile());
-                        dst = dst.sub(1);
-                        src = src.sub(1);
-                    }
-                }
-
-                let blank_cell = self.blank_cell();
-                for _ in 0..clear {
-                    unsafe {
-                        dst.write_volatile(blank_cell);
-                        dst = dst.sub(1);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn state(&self) -> &State {
-        &self.state
-    }
-
-    fn sync(&mut self) -> Result<()> {
-        // Synchronize VGA hardware cursor.
-        let index = self.index();
-        outb(CRTC_ADDRESS_REG, CRTC_CURSOR_LOW_REG);
-        outb(CRTC_DATA_REG, (index & 0xFF) as u8);
-        outb(CRTC_ADDRESS_REG, CRTC_CURSOR_HIGH_REG);
-        outb(CRTC_DATA_REG, ((index >> 8) & 0xFF) as u8);
-        Ok(())
-    }
-
-    fn write(&mut self, s: &[u8]) -> Result<usize> {
-        let cell_count = self.cell_count();
-        let mut cell_index = self.index();
-        let mut i: usize = 0;
-
-        let reset_row: usize = (self.state.height - 1) * self.state.width;
-
-        let mut cell = VgaCell {
-            ch: 0,
-            attributes: self.attributes(),
-        };
-
-        let len = s.len();
-        while i < len {
-            let target = i + core::cmp::min(len - i, cell_count - cell_index);
-            while i < target {
-                cell.ch = s[i];
-                unsafe {
-                    self.ptr.add(cell_index).write_volatile(cell);
-                }
-                cell_index += 1;
-                i += 1;
-            }
-            if cell_index == cell_count {
-                cell_index = reset_row;
-                self.scroll(ScrollDirection::Down, 1)?;
-            }
-        }
-
-        let width = self.state.width;
-        self.state.x = cell_index % width;
-        self.state.y = cell_index / width;
-
-        Ok(len)
     }
 }

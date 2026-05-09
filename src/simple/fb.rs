@@ -1,73 +1,71 @@
-use super::{Capability, Color, Console, Error, Result, ScrollDirection, State};
+use crate::cell_grid::{CellGrid, CellWriter};
+use crate::color::{Color, Palette};
+use crate::cursor::{Cursor, with_cursor_hidden};
 use crate::fb::Framebuffer;
 use crate::font::{BitmapFont, data::DEFAULT_FONT};
+use crate::simple::{
+    BlinkConsole, CellConsole, ColorConsole, Console, CursorConsole, Error, Result,
+};
+
 use core::cmp::min;
 
-/// A framebuffer console designed for use with a memory-mapped framebuffer.
-/// Write-combining memory is implicitly assumed and handled by Console::sync.
-/// Currently only supports 32-bit pixel formats.
-pub struct FbConsole<'a> {
-    pub state: State,
+struct Backend<'a> {
     pub fb: Framebuffer,
     pub font: &'a BitmapFont<'a>,
+    pub cursor: Cursor,
+    pub fg: Color,
+    pub bg: Color,
     pub palette: [(u8, u8, u8); 16],
+    /// Glyph width in bytes.
+    pub glyph_advance: usize,
+    /// Bytes to get the next row's glyph.
+    pub glyph_pitch: usize,
 }
 
-impl<'a> FbConsole<'a> {
-    pub fn new(fb: Framebuffer, font: Option<&'a BitmapFont<'a>>) -> Option<Self> {
-        let font = font.unwrap_or(DEFAULT_FONT);
-        let width = fb.width / font.width;
-        let height = fb.height / font.height;
+impl<'a> Backend<'a> {
+    fn blink(&mut self, cell_grid: &CellGrid) {
+        if !self.cursor.enabled {
+            return;
+        }
+        let visible = !self.cursor.visible;
+        let color = if visible { self.fg } else { self.bg };
+        let color = self.color(color).to_ne_bytes();
+        let bytes_per_pixel = self.fb.bpp / 8;
 
-        if fb.bpp != 32
-            || fb.red_mask.shift > 31
-            || fb.green_mask.shift > 31
-            || fb.blue_mask.shift > 31
-        {
-            return None;
+        let mut pixel = self.get_index(cell_grid);
+
+        for _ in 0..self.font.height {
+            for i in 0..bytes_per_pixel {
+                unsafe {
+                    pixel.add(i).write_volatile(color[i]);
+                }
+            }
+            pixel = unsafe { pixel.add(self.fb.pitch) };
         }
 
-        let min_row_size = fb.width * 4;
-        if fb.pitch < min_row_size {
-            return None;
-        }
-
-        Some(Self {
-            state: State::new(
-                width,
-                height,
-                Capability::RGB | Capability::CURSOR | Capability::BLINK,
-            ),
-            fb,
-            font,
-            palette: [
-                (0, 0, 0),
-                (128, 0, 0),
-                (0, 128, 0),
-                (128, 128, 0),
-                (0, 0, 128),
-                (128, 0, 128),
-                (0, 128, 128),
-                (192, 192, 192),
-                (128, 128, 128),
-                (255, 0, 0),
-                (0, 255, 0),
-                (255, 255, 0),
-                (0, 0, 255),
-                (255, 0, 255),
-                (0, 255, 255),
-                (255, 255, 255),
-            ],
-        })
+        self.cursor.visible = visible;
     }
 
-    /// Clear to default attributes and move cursor to start.
-    pub fn init(&mut self) {
-        self.state.x = 0;
-        self.state.y = 0;
-        let _ = self.clear();
-        let _ = self.enable_cursor(true);
-        let _ = self.sync();
+    fn clear(&mut self) -> Result<()> {
+        let bg = self.color(self.bg).to_ne_bytes();
+        let bytes_per_pixel = self.fb.bpp / 8;
+        let pad = self.fb.pitch - self.fb.width * bytes_per_pixel;
+
+        let mut pixel = self.fb.ptr;
+
+        for _ in 0..self.fb.height {
+            for _ in 0..self.fb.width {
+                for i in 0..bytes_per_pixel {
+                    unsafe {
+                        pixel.write_volatile(bg[i]);
+                        pixel = pixel.add(1)
+                    }
+                }
+            }
+            pixel = unsafe { pixel.add(pad) };
+        }
+
+        Ok(())
     }
 
     fn color(&self, color: Color) -> u32 {
@@ -88,196 +86,168 @@ impl<'a> FbConsole<'a> {
 
         color
     }
+
+    fn new(fb: Framebuffer, font: Option<&'a BitmapFont<'a>>) -> Option<Self> {
+        let font = font.unwrap_or(DEFAULT_FONT);
+
+        if (fb.bpp != 8 && fb.bpp != 16 && fb.bpp != 24 && fb.bpp != 32)
+            || fb.red_mask.shift > 31
+            || fb.green_mask.shift > 31
+            || fb.blue_mask.shift > 31
+        {
+            return None;
+        }
+
+        let min_row_size = fb.width * (fb.bpp / 8);
+        if fb.pitch < min_row_size {
+            return None;
+        }
+
+        Some(Self {
+            fb,
+            font,
+            cursor: Cursor::new(),
+            fg: Color::Palette(Palette::White),
+            bg: Color::Palette(Palette::Black),
+            palette: [
+                (0, 0, 0),
+                (128, 0, 0),
+                (0, 128, 0),
+                (128, 128, 0),
+                (0, 0, 128),
+                (128, 0, 128),
+                (0, 128, 128),
+                (192, 192, 192),
+                (128, 128, 128),
+                (255, 0, 0),
+                (0, 255, 0),
+                (255, 255, 0),
+                (0, 0, 255),
+                (255, 0, 255),
+                (0, 255, 255),
+                (255, 255, 255),
+            ],
+            glyph_advance: font.width * (fb.bpp / 8),
+            glyph_pitch: font.height * fb.pitch,
+        })
+    }
+
+    #[inline(always)]
+    fn get_index(&self, cell_grid: &CellGrid) -> *mut u8 {
+        debug_assert!(cell_grid.x < cell_grid.width);
+        debug_assert!(cell_grid.y < cell_grid.height);
+
+        unsafe {
+            self.fb
+                .ptr
+                .add(cell_grid.y * self.glyph_pitch + cell_grid.x * self.glyph_advance)
+        }
+    }
+
+    fn scroll(&mut self, _: &CellGrid) -> Result<()> {
+        let clear = self.font.height;
+        let bytes_per_pixel = self.fb.bpp / 8;
+        let pad = self.fb.pitch - self.fb.width * bytes_per_pixel;
+        let bg = self.color(self.bg).to_ne_bytes();
+
+        let mut dst = self.fb.ptr;
+        let mut src = unsafe { dst.add(clear * self.fb.pitch) };
+
+        for _ in 0..self.fb.height - clear {
+            for _ in 0..self.fb.width {
+                for _ in 0..bytes_per_pixel {
+                    unsafe {
+                        dst.write_volatile(src.read_volatile());
+                        dst = dst.add(1);
+                        src = src.add(1);
+                    }
+                }
+            }
+            unsafe {
+                dst = dst.add(pad);
+                src = src.add(pad);
+            }
+        }
+
+        for _ in 0..clear {
+            for _ in 0..self.fb.width {
+                for i in 0..bytes_per_pixel {
+                    unsafe {
+                        dst.write_volatile(bg[i]);
+                        dst = dst.add(1);
+                    }
+                }
+            }
+            unsafe { dst = dst.add(pad) };
+        }
+
+        Ok(())
+    }
+
+    fn size(&self) -> (usize, usize) {
+        (
+            self.fb.width / self.font.width,
+            self.fb.height / self.font.height,
+        )
+    }
+
+    fn write_cell(&mut self, _: &CellGrid, pixel: *mut u8, ch: u8) -> Result<()> {
+        let fg = self.color(self.fg).to_ne_bytes();
+        let bg = self.color(self.bg).to_ne_bytes();
+        let font = self.font;
+        let bytes_per_pixel = self.fb.bpp / 8;
+
+        // Bytes per row in glyph.
+        let bpr = (font.width + 7) / 8;
+        // Bytes per glyph.
+        let bpg = bpr * font.height;
+        let glyph = &font.data[bpg * ch as usize..][..bpg];
+        let mut pixel = pixel;
+
+        for gy in 0..font.height {
+            let mut cell_pixel = pixel;
+            for gx in 0..font.width {
+                let is_set = (glyph[gy * bpr + gx / 8] << (gx & 7)) & 0x80 == 0x80;
+                let color = if is_set { fg } else { bg };
+
+                for i in 0..bytes_per_pixel {
+                    unsafe {
+                        cell_pixel.write_volatile(color[i]);
+                        cell_pixel = cell_pixel.add(1);
+                    }
+                }
+            }
+            pixel = unsafe { pixel.add(self.fb.pitch) };
+        }
+
+        Ok(())
+    }
+}
+
+/// A framebuffer console designed for use with a memory-mapped framebuffer.
+/// Write-combining memory is implicitly assumed and handled by Console::flush.
+pub struct FbConsole<'a> {
+    pub cell_grid: CellGrid,
+    backend: Backend<'a>,
+}
+
+impl<'a> FbConsole<'a> {
+    pub fn new(fb: Framebuffer, font: Option<&'a BitmapFont<'a>>) -> Option<Self> {
+        let backend = Backend::new(fb, font)?;
+        let size = backend.size();
+        Some(Self {
+            cell_grid: CellGrid::new(size.0, size.1),
+            backend,
+        })
+    }
 }
 
 impl Console for FbConsole<'_> {
-    fn backspace(&mut self) -> Result<()> {
-        if self.state.x > 0 {
-            self.state.x -= 1;
-        } else {
-            if self.state.y == 0 {
-                return Err(Error::Invalid);
-            }
-            self.state.y -= 1;
-            self.state.x = self.state.width - 1;
-        }
-        Ok(())
-    }
-
-    fn blink_cursor(&mut self, visible: Option<bool>) -> Result<()> {
-        let visible = visible.unwrap_or(!self.state.cursor.visible);
-        let color = if visible {
-            self.color(self.state.fg())
-        } else {
-            self.color(self.state.bg())
-        };
-        let color = color.to_ne_bytes();
-        let font = self.font;
-        let mut index = self.state.y * font.height * self.fb.pitch + self.state.x * font.width * 4;
-
-        for _ in 0..font.height {
-            unsafe {
-                let ptr = self.fb.ptr.add(index);
-                ptr.write_volatile(color[0]);
-                ptr.add(1).write_volatile(color[1]);
-                ptr.add(2).write_volatile(color[2]);
-            }
-            index += self.fb.pitch;
-        }
-
-        self.state.cursor.visible = visible;
-        Ok(())
-    }
-
-    fn carriage_return(&mut self) -> Result<()> {
-        self.state.x = 0;
-        Ok(())
-    }
-
     fn clear(&mut self) -> Result<()> {
-        let bg = self.color(self.state.bg()).to_ne_bytes();
-
-        let width = self.fb.width;
-        let height = self.fb.height;
-        // Amount of bytes between rows.
-        let pad = self.fb.pitch - width * 4;
-        let mut ptr = self.fb.ptr;
-
-        for _ in 0..height {
-            for _ in 0..width {
-                unsafe {
-                    ptr.write_volatile(bg[0]);
-                    ptr.add(1).write_volatile(bg[1]);
-                    ptr.add(2).write_volatile(bg[2]);
-                    ptr = ptr.add(4);
-                }
-            }
-            unsafe {
-                ptr = ptr.add(pad);
-            }
-        }
-
-        Ok(())
+        self.backend.clear()
     }
 
-    fn enable_cursor(&mut self, enabled: bool) -> Result<()> {
-        let cursor = self.state.cursor;
-
-        if !enabled && cursor.visible {
-            // Make the cursor invisible before disabling it.
-            self.blink_cursor(Some(false))?;
-        }
-        self.state.cursor.enabled = enabled;
-
-        Ok(())
-    }
-
-    fn newline(&mut self) -> Result<()> {
-        self.state.x = 0;
-        self.state.y += 1;
-        if self.state.y >= self.state.height {
-            self.state.y = self.state.height - 1;
-            self.scroll(ScrollDirection::Down, 1)?;
-        }
-        Ok(())
-    }
-
-    fn move_cursor(&mut self, x: usize, y: usize) -> Result<()> {
-        if x >= self.state.width || y >= self.state.height {
-            return Err(Error::Invalid);
-        }
-        self.state.x = x;
-        self.state.y = y;
-        Ok(())
-    }
-
-    fn scroll(&mut self, direction: ScrollDirection, rows: usize) -> Result<()> {
-        if rows >= self.state.height {
-            return self.clear();
-        }
-
-        // Bytes per pixel.
-        let bpp = self.fb.bpp / 8;
-        let pad = self.fb.pitch - self.fb.width * bpp;
-        let pitch = self.fb.pitch;
-
-        let clear = self.font.height * rows;
-        let bg = self.color(self.state.bg()).to_ne_bytes();
-
-        match direction {
-            ScrollDirection::Down => {
-                let mut dst = self.fb.ptr;
-                let mut src = unsafe { dst.add(clear * pitch) };
-
-                for _ in 0..self.fb.height - clear {
-                    for _ in 0..self.fb.width * bpp {
-                        unsafe {
-                            dst.write_volatile(src.read_volatile());
-                            dst = dst.add(1);
-                            src = src.add(1);
-                        }
-                    }
-                    unsafe {
-                        dst = dst.add(pad);
-                        src = src.add(pad);
-                    }
-                }
-
-                for _ in 0..clear {
-                    for _ in 0..self.fb.width {
-                        for i in 0..bpp {
-                            unsafe {
-                                dst.write_volatile(bg[i]);
-                                dst = dst.add(1);
-                            }
-                        }
-                    }
-                    unsafe {
-                        dst = dst.add(pad);
-                    }
-                }
-            }
-            ScrollDirection::Up => {
-                let mut dst = unsafe { self.fb.ptr.add(self.fb.height * pitch - pad - 1) };
-                let mut src = unsafe { dst.sub(clear * pitch) };
-
-                for _ in 0..self.fb.height - clear {
-                    for _ in 0..self.fb.width * bpp {
-                        unsafe {
-                            dst.write_volatile(src.read_volatile());
-                            dst = dst.sub(1);
-                            src = src.sub(1);
-                        }
-                    }
-                    unsafe {
-                        dst = dst.sub(pad);
-                        src = src.sub(pad);
-                    }
-                }
-
-                for _ in 0..clear {
-                    for _ in 0..self.fb.width {
-                        for i in 0..bpp {
-                            unsafe {
-                                dst.write_volatile(bg[bpp - 1 - i]);
-                                dst = dst.sub(1);
-                            }
-                        }
-                    }
-                    unsafe {
-                        dst = dst.sub(pad);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn state(&self) -> &State {
-        &self.state
-    }
-
-    fn sync(&mut self) -> Result<()> {
+    fn flush(&mut self) -> Result<()> {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         #[cfg(not(miri))]
         unsafe {
@@ -287,69 +257,98 @@ impl Console for FbConsole<'_> {
     }
 
     fn write(&mut self, s: &[u8]) -> Result<usize> {
-        let len = s.len();
+        let backend = &mut self.backend;
+        let cursor = backend.cursor;
 
-        let font: BitmapFont = *self.font;
-        // Bytes per glyph row.
-        let font_bpr = (font.width + 7) / 8;
-        // Bytes per glyph.
-        let font_bpg = font_bpr * font.height;
+        with_cursor_hidden(
+            backend,
+            &mut self.cell_grid,
+            cursor,
+            |backend, cell_grid| {
+                let mut cell_writer = CellWriter::new(
+                    backend,
+                    Backend::get_index,
+                    Backend::write_cell,
+                    Backend::scroll,
+                );
+                cell_writer.write(cell_grid, s)
+            },
+            Backend::blink,
+        )
+    }
+}
 
-        let pixel_advance = font.width * 4;
-        let mut pixel_index: usize =
-            self.state.y * font.height * self.fb.pitch + self.state.x * pixel_advance;
+impl CellConsole for FbConsole<'_> {
+    fn cell_grid(&self) -> &CellGrid {
+        &self.cell_grid
+    }
 
-        let cell_count: usize = self.state.width * self.state.height;
-        let mut cell_index: usize = self.state.y * self.state.width + self.state.x;
-        let mut i: usize = 0;
-
-        let reset_row = self.state.height - 1;
-        let reset_pixel_index = reset_row * font.height * self.fb.pitch;
-        let reset_cell_index = reset_row * self.state.width;
-
-        let fg = self.color(self.state.fg()).to_ne_bytes();
-        let bg = self.color(self.state.bg()).to_ne_bytes();
-
-        while i < len {
-            let target = i + min(len - i, cell_count - cell_index);
-            while i < target {
-                let ch = s[i];
-                // Points at the start of each row.
-                let mut row_pixel = unsafe { self.fb.ptr.add(pixel_index) };
-                let glyph = &font.data[ch as usize * font_bpg..][..font_bpg];
-                for gy in 0..font.height {
-                    let mut pixel = row_pixel;
-                    for gx in 0..font.width {
-                        let is_set = (glyph[gy * font_bpr + gx / 8] << (gx & 7)) & 0x80 == 0x80;
-                        let color = if is_set { fg } else { bg };
-                        unsafe {
-                            pixel.write_volatile(color[0]);
-                            pixel.add(1).write_volatile(color[1]);
-                            pixel.add(2).write_volatile(color[2]);
-                            pixel = pixel.add(4);
-                        }
-                    }
-                    row_pixel = unsafe { row_pixel.add(self.fb.pitch) };
-                }
-                cell_index += 1;
-                if cell_index % self.state.width != 0 {
-                    pixel_index += pixel_advance;
-                } else {
-                    // Move to the next row.
-                    pixel_index = (cell_index / self.state.width) * font.height * self.fb.pitch;
-                }
-                i += 1;
-            }
-            if cell_index == cell_count {
-                pixel_index = reset_pixel_index;
-                cell_index = reset_cell_index;
-                self.scroll(ScrollDirection::Down, 1)?;
-            }
+    fn position(&mut self, x: usize, y: usize) -> Result<()> {
+        if x >= self.cell_grid.width || y >= self.cell_grid.height {
+            return Err(Error::Invalid);
         }
+        let cursor = self.backend.cursor;
+        with_cursor_hidden(
+            &mut self.backend,
+            &mut self.cell_grid,
+            cursor,
+            |_, cell_grid| {
+                cell_grid.x = x;
+                cell_grid.y = y;
+                Ok(())
+            },
+            Backend::blink,
+        )
+    }
 
-        self.state.x = cell_index % self.state.width;
-        self.state.y = cell_index / self.state.width;
+    fn scroll(&mut self) -> Result<()> {
+        let cursor = self.backend.cursor;
+        with_cursor_hidden(
+            &mut self.backend,
+            &mut self.cell_grid,
+            cursor,
+            |backend, cell_grid| backend.scroll(cell_grid),
+            Backend::blink,
+        )
+    }
+}
 
-        Ok(len)
+impl CursorConsole for FbConsole<'_> {
+    fn enable(&mut self, enable: bool) -> Result<()> {
+        if !enable && self.backend.cursor.visible {
+            self.backend.blink(&self.cell_grid);
+        }
+        self.backend.cursor.enabled = enable;
+        Ok(())
+    }
+}
+
+impl BlinkConsole for FbConsole<'_> {
+    fn blink(&mut self) {
+        self.backend.blink(&self.cell_grid)
+    }
+
+    fn visible(&self) -> bool {
+        self.backend.cursor.visible
+    }
+}
+
+impl ColorConsole for FbConsole<'_> {
+    fn fg(&self) -> Color {
+        self.backend.fg
+    }
+
+    fn bg(&self) -> Color {
+        self.backend.bg
+    }
+
+    fn set_fg(&mut self, fg: Color) -> Result<()> {
+        self.backend.fg = fg;
+        Ok(())
+    }
+
+    fn set_bg(&mut self, bg: Color) -> Result<()> {
+        self.backend.bg = bg;
+        Ok(())
     }
 }

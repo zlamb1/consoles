@@ -1,10 +1,8 @@
 use crate::color::{Color, Palette};
 use crate::fb::{Framebuffer, Mask};
-use crate::simple::Console;
+use crate::simple::{CellConsole, ColorConsole, fb::FbConsole};
 
-use super::fb::FbConsole;
-
-fn harness(console: &mut impl Console) {
+fn harness(console: &mut (impl ColorConsole + CellConsole)) {
     let colors = [
         Palette::White,
         Palette::LightCyan,
@@ -25,8 +23,10 @@ fn harness(console: &mut impl Console) {
 
     console.clear().unwrap();
     for color in colors {
-        console.state().set_fg(Color::Palette(color)).unwrap();
-        super::write(console, b"The quick brown fox jumps over the lazy dog.\n").unwrap();
+        console.set_fg(Color::Palette(color)).unwrap();
+        console
+            .write(b"The quick brown fox jumps over the lazy dog.\n")
+            .unwrap();
     }
 }
 
@@ -53,12 +53,14 @@ fn rgbx_8888_pad_0() {
     harness(&mut fb_console);
 }
 
+#[cfg(not(miri))]
 mod sdl3_tests {
     use sdl3::event::Event;
+    use sdl3::keyboard::Keycode;
     use sdl3::pixels::PixelFormat;
     use sdl3::surface::Surface;
 
-    use crate::simple::Console;
+    use crate::simple::{BlinkConsole, CellConsole};
 
     #[test]
     fn sdl3_test() {
@@ -95,10 +97,10 @@ mod sdl3_tests {
             }
         };
 
-        let mut fb_console = super::FbConsole::new(fb, None).unwrap();
-        fb_console.blink_cursor(Some(true)).unwrap();
+        let mut console = super::FbConsole::new(fb, None).unwrap();
+        console.blink();
 
-        super::harness(&mut fb_console);
+        super::harness(&mut console);
 
         let mut canvas = window.into_canvas();
         let texture_creator = canvas.texture_creator();
@@ -113,13 +115,19 @@ mod sdl3_tests {
             for event in event_pump.poll_iter() {
                 match event {
                     Event::Quit { .. } => break 'event_loop,
+                    Event::KeyDown {
+                        keycode: Some(Keycode::Return),
+                        ..
+                    } => {
+                        console.scroll().unwrap();
+                    }
                     _ => {}
                 }
             }
             let now = sdl3::timer::ticks();
             if now - ticks >= 350 {
                 ticks = now;
-                fb_console.blink_cursor(None).unwrap();
+                console.blink();
             }
             let texture = surface.as_texture(&texture_creator).unwrap();
             canvas.copy(&texture, None, None).unwrap();

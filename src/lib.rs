@@ -1,4 +1,6 @@
+pub mod cell_grid;
 pub mod color;
+pub mod cursor;
 pub mod fb;
 pub mod font;
 
