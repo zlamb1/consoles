@@ -97,7 +97,6 @@ impl<
                 let ch = s[i];
                 i += 1;
 
-                let is_end_cell = cell_index == cell_count - 1;
                 let deferred_wrap = cell_grid.deferred_wrap;
 
                 if deferred_wrap {
@@ -120,7 +119,7 @@ impl<
                         continue 'outer;
                     }
                     b'\n' => {
-                        if deferred_wrap && !is_end_cell {
+                        if deferred_wrap && cell_index == cell_count - 1 {
                             continue;
                         }
                         cell_grid.x = 0;
@@ -142,7 +141,7 @@ impl<
                     _ => {}
                 }
 
-                if deferred_wrap && is_end_cell {
+                if deferred_wrap && cell_index == cell_count - 1 {
                     // Printable character. Needs scroll.
                     cell_grid.x = 0;
                     cell_index = reset_index;
