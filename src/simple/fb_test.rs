@@ -68,7 +68,7 @@ mod sdl3_tests {
         let video_subsystem = sdl_context.video().unwrap();
 
         let window = video_subsystem
-            .window("framebuffer test", 800, 600)
+            .window("framebuffer test", 180, 600)
             .position_centered()
             .opengl()
             .build()

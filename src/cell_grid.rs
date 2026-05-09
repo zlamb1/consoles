@@ -10,6 +10,8 @@ pub struct CellGrid {
     pub x: usize,
     /// Current row position in grid.
     pub y: usize,
+    /// Whether to consume a newline or not.
+    pub deferred_wrap: bool,
 }
 
 impl CellGrid {
@@ -27,6 +29,7 @@ impl CellGrid {
             height,
             x: 0,
             y: 0,
+            deferred_wrap: false,
         }
     }
 }
@@ -71,7 +74,6 @@ impl<
         }
     }
 
-    #[inline(always)]
     pub fn write(&'a mut self, cell_grid: &mut CellGrid, s: &[u8]) -> Result<usize> {
         let len = s.len();
         let width = cell_grid.width;
@@ -95,6 +97,13 @@ impl<
                 let ch = s[i];
                 i += 1;
 
+                let is_end_cell = cell_index == cell_count - 1;
+                let deferred_wrap = cell_grid.deferred_wrap;
+
+                if deferred_wrap {
+                    cell_grid.deferred_wrap = false;
+                }
+
                 match ch {
                     0x8 => {
                         if cell_index == 0 {
@@ -111,6 +120,9 @@ impl<
                         continue 'outer;
                     }
                     b'\n' => {
+                        if deferred_wrap && !is_end_cell {
+                            continue;
+                        }
                         cell_grid.x = 0;
                         cell_grid.y += 1;
                         if cell_grid.y == height {
@@ -130,12 +142,21 @@ impl<
                     _ => {}
                 }
 
+                if deferred_wrap && is_end_cell {
+                    // Printable character. Needs scroll.
+                    cell_grid.x = 0;
+                    cell_index = reset_index;
+                    self.index = (self.get_index)(self.ctx, cell_grid);
+                    (self.scroll)(self.ctx, cell_grid)?;
+                }
+
                 (self.write_cell)(self.ctx, cell_grid, self.index, ch)?;
 
                 cell_grid.x += 1;
                 if cell_grid.x == width {
                     cell_grid.x = 0;
                     cell_grid.y += 1;
+                    cell_grid.deferred_wrap = true;
                 }
                 cell_index += 1;
 
@@ -144,10 +165,11 @@ impl<
                 }
             }
             if cell_index == cell_count {
+                // Cursor logically floats at last cell.
+                cell_grid.x = width - 1;
                 cell_grid.y = height - 1;
-                cell_index = reset_index;
+                cell_index -= 1;
                 self.index = (self.get_index)(self.ctx, cell_grid);
-                (self.scroll)(self.ctx, cell_grid)?;
             }
         }
 
