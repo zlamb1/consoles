@@ -119,7 +119,7 @@ impl<
                         continue 'outer;
                     }
                     b'\n' => {
-                        if deferred_wrap && cell_index == cell_count - 1 {
+                        if deferred_wrap && !(cell_index == cell_count - 1) {
                             continue;
                         }
                         cell_grid.x = 0;
