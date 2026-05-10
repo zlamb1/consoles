@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+x86 = { git = "https://github.com/zlamb1/crates.git" }
 
 [dev-dependencies]
 sdl3 = { version = "0", features = [] }

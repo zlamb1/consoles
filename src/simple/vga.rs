@@ -3,6 +3,8 @@ use crate::color::{Color, Palette};
 use crate::cursor::Cursor;
 use crate::simple::{CellConsole, ColorConsole, Console, CursorConsole, Error, Result};
 
+use x86::{inb, outb};
+
 const CRTC_ADDRESS_REG: u16 = 0x3D4;
 const CRTC_DATA_REG: u16 = 0x3D5;
 const CRTC_CURSOR_START_REG: u8 = 0xA;
@@ -142,20 +144,6 @@ impl VgaConsole {
             cell_grid: CellGrid::new(Self::COLS, Self::ROWS),
             cursor: Cursor::new(),
         }
-    }
-}
-
-fn inb(port: u16) -> u8 {
-    let mut v: u8;
-    unsafe {
-        core::arch::asm!("in al, dx", out("al")v, in("dx")port, options(nomem, nostack));
-    }
-    v
-}
-
-fn outb(port: u16, v: u8) {
-    unsafe {
-        core::arch::asm!("out dx, al", in("dx")port, in("al")v, options(nomem, nostack));
     }
 }
 

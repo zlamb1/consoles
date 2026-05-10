@@ -36,4 +36,10 @@ name = "term"
 version = "0.1.0"
 dependencies = [
  "sdl3",
+ "x86",
 ]
+
+[[package]]
+name = "x86"
+version = "0.1.0"
+source = "git+https://github.com/zlamb1/crates.git#754f045ae1df5896ae83aa40302d054e55c53f50"
